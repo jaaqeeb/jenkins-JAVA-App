@@ -1,0 +1,88 @@
+pipeline {
+    agent any
+
+    tools {
+        jdk 'JDK17'
+        maven 'Maven3'
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    environment {
+        // Create this server entry under Jenkins:
+        // Manage Jenkins -> System -> SonarQube installations.
+        SONARQUBE_SERVER = 'SonarQube'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Compile and Unit Test') {
+            steps {
+                sh 'mvn -B clean verify'
+            }
+            post {
+                always {
+                    junit testResults: '**/target/surefire-reports/*.xml',
+                          allowEmptyResults: true
+                }
+            }
+        }
+
+        stage('Dependency Vulnerability Scan') {
+            steps {
+                // The plugin is declared in pom.xml.
+                // First run can take longer while vulnerability data is downloaded.
+                sh 'mvn -B org.owasp:dependency-check-maven:12.1.0:check'
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: '**/target/dependency-check-report.*',
+                                     allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv("${SONARQUBE_SERVER}") {
+                    sh 'mvn -B org.sonarsource.scanner.maven:sonar-maven-plugin:5.1.0.4751:sonar'
+                }
+            }
+        }
+
+        stage('SonarQube Quality Gate') {
+            steps {
+                timeout(time: 10, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        // Enable only after Nexus is configured and the matching
+        // server ID/credentials exist in the Jenkins-managed Maven settings.xml.
+        // stage('Publish to Nexus') {
+        //     when { branch 'main' }
+        //     steps {
+        //         sh 'mvn -B deploy -DskipTests'
+        //     }
+        // }
+    }
+
+    post {
+        success {
+            echo 'CI passed: build, tests, dependency scan, and SonarQube quality gate.'
+        }
+        failure {
+            echo 'CI failed. Review the stage logs and archived reports.'
+        }
+    }
+}
